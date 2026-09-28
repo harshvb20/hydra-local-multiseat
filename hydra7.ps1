@@ -43,6 +43,97 @@ $PSNativeCommandUseErrorActionPreference = $false
 Set-Location $Root
 function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
 
+# ------------------------------------------- console taskbar on seat panel --
+# Windows only hides a taskbar behind a fullscreen window while that window is
+# in the foreground. In mode 7 the teacher works on the laptop, so the console's
+# secondary taskbar sat on top of the seat's screen, above seat B's own taskbar.
+# Off while the seat is up, back on at -Stop.
+# HKCU: run elevated from the SAME account, or this edits the wrong hive.
+$mmKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+# PID of the explorer that owns THIS session's taskbar. FindWindow only sees
+# the calling session, so seat B's shell can never match.
+# Removes a window's taskbar button (ITaskbarList::DeleteTab). A fresh COM
+# object per call, so it always reaches the explorer running NOW -- no stale
+# binding like the VirtualDesktop module has.
+if (-not ('HydraTaskbar' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface ITaskbarList {
+    void HrInit();
+    void AddTab(IntPtr hwnd);
+    void DeleteTab(IntPtr hwnd);
+    void ActivateTab(IntPtr hwnd);
+    void SetActiveAlt(IntPtr hwnd);
+}
+[ComImport, Guid("56FDF344-FD6D-11d0-958A-006097C9A090")]
+class CTaskbarList { }
+public static class HydraTaskbar {
+    public static void Hide(IntPtr hwnd) {
+        ITaskbarList t = (ITaskbarList)new CTaskbarList();
+        try { t.HrInit(); t.DeleteTab(hwnd); }
+        finally { Marshal.ReleaseComObject(t); }
+    }
+}
+'@
+}
+if (-not ('HydraShellWin' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class HydraShellWin {
+    [DllImport("user32.dll")] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    public static int TrayPid() {
+        IntPtr h = FindWindow("Shell_TrayWnd", null);
+        if (h == IntPtr.Zero) return 0;
+        uint pid; GetWindowThreadProcessId(h, out pid);
+        return (int)pid;
+    }
+}
+'@
+}
+function Set-ConsoleTaskbarOnAllDisplays([bool]$On) {
+    $want = [int]$On
+    $have = (Get-ItemProperty $mmKey -Name MMTaskbarEnabled -EA SilentlyContinue).MMTaskbarEnabled
+    if ($null -eq $have) { $have = 1 }      # absent = Windows default = on
+    if ($have -eq $want) { return }         # no change, no explorer restart
+    Set-ItemProperty `
+        -Path $mmKey `
+        -Name 'MMTaskbarEnabled' `
+        -Value $want `
+        -Type DWord
+    # Folder windows in their own process, so killing the shell spares them.
+    # Explorer reads this at start: the FIRST restart after it is set still
+    # takes open folder windows with it. Every restart after that leaves them.
+    if ((Get-ItemProperty $mmKey -Name SeparateProcess -EA SilentlyContinue).SeparateProcess -ne 1) {
+        Set-ItemProperty `
+            -Path $mmKey `
+            -Name 'SeparateProcess' `
+            -Value 1 `
+            -Type DWord
+        Say "  folder windows set to a separate process (open ones close this once)" Yellow
+    }
+    # Kill ONLY the shell: the explorer that owns this session's taskbar.
+    # Not seat B's shell (other session), not the folder-window process.
+    $old = [HydraShellWin]::TrayPid()
+    if ($old) { Stop-Process -Id $old -Force }
+    # Wait for a NEW taskbar, then let it settle. Virtual desktops live in the
+    # shell; a window created while it is still starting can lose its pin.
+    # (A surviving folder-window explorer means "any explorer running" is no
+    # longer proof the shell is back -- hence the tray check.)
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep 1
+        $now = [HydraShellWin]::TrayPid()
+        if ($now -and $now -ne $old) { break }
+    }
+    if (-not [HydraShellWin]::TrayPid()) { Start-Process explorer }
+    Start-Sleep 4
+    Say "  console taskbar on all displays: $(if ($On) { 'on' } else { 'off' })" DarkGray
+}
+
 # ---------------------------------------------------------------- stop -----
 function Stop-Everything {
     Say "stopping ..." Cyan
@@ -59,7 +150,7 @@ function Stop-Everything {
     Say "stopped." Green
 }
 
-if ($Stop) { Stop-Everything; return }
+if ($Stop) { Stop-Everything; Set-ConsoleTaskbarOnAllDisplays $true; return }
 Stop-Everything
 Say ""
 
@@ -102,6 +193,12 @@ if ((Get-Service TermService).Status -ne 'Running') {
     Start-Service TermService
 }
 # --- end termsrv preflight -----------------------------------------------
+# Console taskbar off the seat panel. After the preflight, so a failed
+# preflight does not leave it switched off. Before the service so explorer has the
+# service start and audio pin to finish restarting before the client window
+# exists -- a window born into a half-started explorer can lose its pin.
+Set-ConsoleTaskbarOnAllDisplays $false
+
 Say "starting Hydra service ..." Cyan
 Start-Service Hydra
 for ($i = 0; $i -lt 20; $i++) {
@@ -178,15 +275,55 @@ Say "seat session up." Green
 # A fullscreen client belongs to the virtual desktop it was launched from, and
 # virtual desktops span all monitors -- so switching away hides the seat's
 # screen from the student. Pinning puts it on every desktop.
+#
+# The pin runs in a FRESH PowerShell process every time. The VirtualDesktop
+# module binds to explorer's COM objects once, when it first loads, and keeps
+# them for the life of the process. After explorer restarts (the taskbar
+# toggle, -Stop, a crash), a shell that already loaded the module is talking
+# to a dead explorer and every pin silently fails. A child process always binds
+# to the explorer that is running now.
 Start-Sleep 3
-try {
-    Import-Module -Name VirtualDesktop -DisableNameChecking -EA Stop
-    $h = (Get-Process sdl-freerdp -EA SilentlyContinue | Where-Object MainWindowHandle -ne 0 | Select-Object -First 1).MainWindowHandle
-    if ($h) { Pin-Window -Hwnd $h | Out-Null; Say "client pinned to all virtual desktops" Green }
-    else    { Say "  no client window found to pin" Yellow }
-} catch {
-    Say "  could not pin the client -- if the panel goes blank when you switch" Yellow
-    Say "  virtual desktops, that is why." Yellow
+$pinScript = {
+    param([long]$hwnd)
+    try {
+        Import-Module -Name VirtualDesktop -DisableNameChecking -EA Stop
+        Pin-Window -Hwnd ([IntPtr]$hwnd) | Out-Null
+        if (Test-WindowPinned -Hwnd ([IntPtr]$hwnd)) { exit 0 }
+        'pin call returned but Test-WindowPinned says no'
+        exit 1
+    } catch { "$_"; exit 2 }
+}
+$psExe = (Get-Process -Id $PID).Path
+$pinned = $false
+$pinMsg = 'no client window found'
+for ($i = 1; $i -le 10 -and -not $pinned; $i++) {
+    $h = (Get-Process sdl-freerdp -EA SilentlyContinue |
+        Where-Object MainWindowHandle -ne 0 |
+        Select-Object -First 1).MainWindowHandle
+    if ($h) {
+        $pinMsg = & $psExe -NoProfile -Command $pinScript -args $h.ToInt64() 2>&1 | Out-String
+        $pinned = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $pinned) { Start-Sleep 2 }
+}
+if ($pinned) {
+    Say "client pinned to all virtual desktops" Green
+} else {
+    Say "  client NOT pinned after 10 tries: $($pinMsg.Trim())" Yellow
+    Say "  if the panel goes blank when you switch virtual desktops, that is why." Yellow
+}
+
+# ------------------------------------------------------ taskbar button ------
+# With the console taskbar off the seat panel, the client's button lands on the
+# laptop's taskbar -- on every virtual desktop, since it is pinned. The teacher
+# never needs it: the seat is reached by moving the cursor onto its panel.
+# The client LOG window keeps its button; that one is useful.
+$h = (Get-Process sdl-freerdp -EA SilentlyContinue |
+    Where-Object MainWindowHandle -ne 0 |
+    Select-Object -First 1).MainWindowHandle
+if ($h) {
+    try   { [HydraTaskbar]::Hide($h); Say "client taskbar button removed" Green }
+    catch { Say "  could not remove the client taskbar button: $_" Yellow }
 }
 
 # ------------------------------------------------------------- verify ------
