@@ -19,7 +19,7 @@ $stateDirectory = Join-Path $Root 'state\local-clients'
 $statePath = Join-Path $stateDirectory "$Seat.json"
 $consoleSession = (Get-Process -Id $PID).SessionId
 
-function Invoke-ReadCommand([string]$Path, [string[]]$Arguments) {
+function Invoke-ReadCommand([string]$Path, [string[]]$Arguments, [int[]]$AcceptedExitCodes = @(0)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing prerequisite: $Path" }
     $old = $ErrorActionPreference
     try {
@@ -27,7 +27,7 @@ function Invoke-ReadCommand([string]$Path, [string[]]$Arguments) {
         $text = (& $Path @Arguments 2>&1 | Out-String)
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $old }
-    if ($code -ne 0) { throw "$Path exited $code`: $text" }
+    if ($code -notin $AcceptedExitCodes) { throw "$Path exited $code`: $text" }
     return $text
 }
 
@@ -79,7 +79,9 @@ try {
     if (-not $Config) { $Config = Join-Path $dist 'seats.toml' }
     $configuration = Invoke-ReadCommand $control @('config', $Config) | ConvertFrom-Json
     $windowsListing = Invoke-ReadCommand (Join-Path $dist 'clip_console.exe') @()
-    $clientListing = Invoke-ReadCommand $client @('/list:monitor')
+    # FreeRDP 3.32.1 on Windows returns -1 for this successful informational
+    # command. The structured listing is still validated by the planner below.
+    $clientListing = Invoke-ReadCommand $client @('/list:monitor') @(0, -1)
     $launch = New-HydraLocalPlan $configuration $Seat $windowsListing $clientListing
     if (-not $Start) { $launch; return }
 
