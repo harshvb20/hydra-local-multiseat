@@ -61,6 +61,7 @@
 #include <windows.h>
 #include "../common/hydra_ipc.h"
 #include "../common/hydra_seat.h"
+#include "hydra_mouse_buttons.h"
 #include <mmsystem.h>   /* timeBeginPeriod / timeEndPeriod */
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,14 +118,10 @@ typedef struct {
 #define I_MOUSE_WHEEL  0x400
 #define I_MOUSE_HWHEEL 0x800
 static const struct { unsigned short bit; DWORD flag; DWORD data; } MOUSE_MAP[] = {
-    /* LEFT-HANDED. SendInput injects the LITERAL button named, ignoring the
-     * user's SwapMouseButtons setting entirely -- so setting it in teacher's
-     * profile has no effect on injected input. The swap has to happen here.
-     * Bit 0x001 is the physical primary button. */
-    { 0x001, MOUSEEVENTF_RIGHTDOWN,  0        },
-    { 0x002, MOUSEEVENTF_RIGHTUP,    0        },
-    { 0x004, MOUSEEVENTF_LEFTDOWN,   0        },
-    { 0x008, MOUSEEVENTF_LEFTUP,     0        },
+    { 0x001, MOUSEEVENTF_LEFTDOWN,   0        },
+    { 0x002, MOUSEEVENTF_LEFTUP,     0        },
+    { 0x004, MOUSEEVENTF_RIGHTDOWN,  0        },
+    { 0x008, MOUSEEVENTF_RIGHTUP,    0        },
     { 0x010, MOUSEEVENTF_MIDDLEDOWN, 0        },
     { 0x020, MOUSEEVENTF_MIDDLEUP,   0        },
     { 0x040, MOUSEEVENTF_XDOWN,      XBUTTON1 },
@@ -377,8 +374,9 @@ static void process_record(const WireEvent *ev) {
         push_move(ev->dx, ev->dy);
     }
 
+    const unsigned short buttons = hydra_mouse_button_state(ev->a, GetSystemMetrics(SM_SWAPBUTTON));
     for (size_t i = 0; i < MOUSE_MAP_N; i++)
-        if (ev->a & MOUSE_MAP[i].bit)
+        if (buttons & MOUSE_MAP[i].bit)
             push_mouse(MOUSE_MAP[i].flag, MOUSE_MAP[i].data);
 
     if (ev->a & I_MOUSE_WHEEL) {

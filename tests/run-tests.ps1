@@ -11,7 +11,7 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
 }
 $out = Join-Path $root 'dist\tests'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
-foreach ($name in @('test_config.cpp', 'test_input_binding.c', 'test_edid.c')) {
+foreach ($name in @('test_config.cpp', 'test_input_binding.c', 'test_mouse_buttons.c', 'test_edid.c')) {
     $stem = [IO.Path]::GetFileNameWithoutExtension($name)
     $exe = Join-Path $out "$stem.exe"
     $flags = @('/nologo', '/W4', '/MT', "/Fo:$out\$stem.obj", "/Fe:$exe")
