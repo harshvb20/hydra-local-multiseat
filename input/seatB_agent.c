@@ -60,6 +60,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include "../common/hydra_ipc.h"
+#include "../common/hydra_seat.h"
 #include <mmsystem.h>   /* timeBeginPeriod / timeEndPeriod */
 #include <stdio.h>
 #include <stdlib.h>
@@ -521,6 +522,13 @@ static DWORD WINAPI cursor_pos_thread(LPVOID arg) {
 int main(int argc, char **argv) {
     const char *host = (argc > 1) ? argv[1] : "127.0.0.1";
     const char *port = (argc > 2) ? argv[2] : "56789";
+    const char *seatName = (argc > 3) ? argv[3] : "B";
+    int parsedPort;
+    if (argc > 4 || !hydra_valid_seat_name(seatName) ||
+        !hydra_parse_number(port, 1, HYDRA_MAX_AGENT_PORT, &parsedPort)) {
+        fprintf(stderr, "usage: seatB_agent [host [port [seat-name]]]\n");
+        return 2;
+    }
 
     SetConsoleCtrlHandler(on_ctrl, TRUE);
     disable_quickedit();
@@ -571,7 +579,9 @@ int main(int argc, char **argv) {
     timeBeginPeriod(1);
 
     /* Cursor position publisher for hydrardp -- harmless when nothing reads it. */
-    { static char seatName[8] = "B"; CreateThread(NULL, 0, cursor_pos_thread, seatName, 0, NULL); }
+    /* argv strings live until main exits. Each agent must publish ONLY its own
+     * seat; the former hard-coded B made C/D overwrite B's cursor position. */
+    CreateThread(NULL, 0, cursor_pos_thread, (LPVOID)seatName, 0, NULL);
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
